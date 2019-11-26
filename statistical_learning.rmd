@@ -15,3 +15,190 @@ set.seed(11)
 ```
 
 ## Lasso
+```{r}
+bwt_df = 
+  read_csv("./data/birthweight.csv") %>% 
+  janitor::clean_names() %>%
+  mutate(
+    babysex = as.factor(babysex),
+    babysex = fct_recode(babysex, "male" = "1", "female" = "2"),
+    frace = as.factor(frace),
+    frace = fct_recode(frace, "white" = "1", "black" = "2", "asian" = "3", 
+                       "puerto rican" = "4", "other" = "8"),
+    malform = as.logical(malform),
+    mrace = as.factor(mrace),
+    mrace = fct_recode(mrace, "white" = "1", "black" = "2", "asian" = "3", 
+                       "puerto rican" = "4")) %>% 
+  sample_n(200)
+```
+
+To use the lasso we will look at the GLM net package (default package for fitting lasso)
+```{r}
+## the number in the bracket [],-1] tells it to strip the header column
+x = model.matrix(bwt ~ ., bwt_df)[,-1]
+y = bwt_df$bwt
+
+lasso_fit = glmnet(x,y)
+
+```
+
+You can be very clear about what lambdas you want to put 
+
+Grid of lambda's, aquired by playing around with the data and finding ones that looked good. 
+```{r}
+lambda = 10^(seq(3, -2, -0.1))
+
+lasso_fit =
+  glmnet(x, y, lambda = lambda)
+
+lasso_cv =
+  cv.glmnet(x, y, lambda = lambda)
+
+lambda_opt = lasso_cv$lambda.min
+```
+
+The results that come out of lasso fit are messy, can use broom::tidy() to clean up results. 
+```{r}
+broom::tidy(lasso_fit) %>% 
+  select(term, lambda, estimate) %>% 
+  complete(term, lambda, fill = list(estimate = 0) ) %>% 
+  filter(term != "(Intercept)") %>% 
+  ggplot(aes(x = log(lambda, 10), y = estimate, group = term, color = term)) + 
+  geom_path() + 
+  geom_vline(xintercept = log(lambda_opt, 10), color = "blue", size = 1.2) +
+  theme(legend.position = "none")
+```
+
+Blue line = optimal lambda
+
+Showing the CV curve itself. 
+```{r}
+broom::tidy(lasso_cv) %>% 
+  ggplot(aes(x = log(lambda, 10), y = estimate)) + 
+  geom_point()  
+```
+Lmda min = lambda value that minimuzes the curve. Can pull that number out
+
+Coefficients from optimal model are shown below
+```{r}
+lasso_fit = 
+  glmnet(x, y, lambda = lambda_opt)
+
+lasso_fit %>% broom::tidy()
+```
+
+
+## Clustering: example 1
+Only working with 2 variables (HP and Speed) so that we can plot the results
+```{r}
+poke_df = 
+  read_csv("./data/pokemon.csv") %>% 
+  janitor::clean_names() %>% 
+  select(hp, speed)
+
+poke_df %>% 
+  ggplot(aes(x = hp, y = speed)) + 
+  geom_point()
+```
+
+setting k means with 3 clusters
+```{r}
+kmeans_fit =
+  kmeans(x = poke_df, centers = 3)
+```
+
+process and plot results
+broom augemnt updates dataframe with k means fit
+```{r}
+poke_df =
+  broom::augment(kmeans_fit, poke_df)
+
+poke_df %>% 
+  ggplot(aes(x = hp, y = speed, color = .cluster)) +
+  geom_point()
+```
+
+What happens is you have 2, 3, or 4, clusters. 
+In the plots below, 3 groups look the best. 
+```{r}
+clusts =
+  tibble(k = 2:4) %>%
+  mutate(
+    km_fit =    map(k, ~kmeans(poke_df, .x)),
+    augmented = map(km_fit, ~broom::augment(.x, poke_df))
+  )
+
+clusts %>% 
+  select(-km_fit) %>% 
+  unnest(augmented) %>% 
+  ggplot(aes(hp, speed, color = .cluster)) +
+  geom_point(aes(color = .cluster)) +
+  facet_grid(~k)
+```
+
+## Clustering: trajectories
+This framework has become popular over the past few years due to proc traj in SAS
+```{r}
+traj_data = 
+  read_csv("./data/trajectories.csv")
+```
+
+```{r}
+traj_data %>% 
+  ggplot(aes(x = week, y = value, group = subj)) + 
+  geom_point() + 
+  geom_path()
+```
+Given this data I could estimate an intercept and a slope for each person.  Can show which path they followed. Helpful, but if you cluster them you can see how groups of people went through the anaylsis. 
+
+Setting a separate linear regression for each person in the dataset. 
+```{r}
+int_slope_df = 
+  traj_data %>% 
+  nest(data = week:value) %>% 
+  mutate(
+    models = map(data, ~lm(value ~ week, data = .x)),
+    result = map(models, broom::tidy)
+  ) %>% 
+  select(subj, result) %>% 
+  unnest(result) %>% 
+  select(subj, term, estimate) %>% 
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) %>% 
+  rename(int = "(Intercept)", slope = week)
+```
+
+```{r}
+int_slope_df %>% 
+  ggplot(aes(x = int, y = slope)) + 
+  geom_point()
+```
+
+scale function normalizes everything, so that the scale shouldnt matter any more
+```{r}
+km_fit = 
+  kmeans(
+    x = int_slope_df %>% select(-subj) %>% scale, 
+    centers = 2)
+
+int_slope_df =
+  broom::augment(km_fit, int_slope_df)
+```
+
+Code below makes a plot for 2 clusters even if it is not the best outpit. 
+```{r}
+int_slope_df %>% 
+  ggplot(aes(x = int, y = slope, color = .cluster)) +
+  geom_point()
+```
+
+Taking the OG trajectory data with the subject id and the cluster adssignment shaded with the colors from the cluster assignments.
+```{r}
+left_join(traj_data, int_slope_df) %>% 
+  ggplot(aes(x = week, y = value, group = subj, color = .cluster)) + 
+  geom_point() + 
+  geom_path() 
+```
+
